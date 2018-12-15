@@ -1,0 +1,282 @@
+bl_info = {
+    "name": "Building Tools",
+    "author": "Ian Ichung'wa Karanja (ranjian0)",
+    "version": (1, 0),
+    "blender": (2, 75, 0),
+    "location": "View3D > Toolshelf > Building Tools",
+    "description": "Building Creation Tools",
+    "warning": "",
+    "wiki_url": "",
+    "tracker_url": "",
+    "category": "Mesh"
+}
+
+import bpy
+import bmesh
+import random
+import operator
+import functools as ft
+import bgl
+from bmesh.types import BMVert
+from mathutils import Vector, Matrix
+from bpy.props import *
+from bpy_extras import view3d_utils
+# =======================================================
+#
+#           PANEL UI
+#
+# =======================================================
+
+
+class MeshGenerationPanel(bpy.types.Panel):
+    """UI panel for building operators and properties"""
+
+    bl_idname = "VIEW3D_PT_btools"
+    bl_label = "Mesh Generation"
+
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'TOOLS'
+    bl_category = 'Building Tools'
+
+    def draw(self, context):
+        layout = self.layout
+        active = context.object
+
+        # Draw Operators
+        # ``````````````
+        col = layout.column(align=True)
+        col.operator("btools.add_floorplan")
+
+
+def clamp(val, _min, _max):
+    """ Reset val between _min and __max """
+    return max(min(val, _max), _min)
+
+def plane(bm, width=2, length=2):
+    """ Create a plane in the given bmesh"""
+
+    sc_x = Matrix.Scale(width, 4, (1, 0, 0))
+    sc_y = Matrix.Scale(length, 4, (0, 1, 0))
+    mat = sc_x * sc_y
+    ret = bmesh.ops.create_grid(
+        bm, x_segments=1, y_segments=1, size=1, matrix=mat)
+    return ret
+
+
+def filter_geom(geom, _type):
+    """ Find all elements of type _type in geom iterable """
+    return list(filter(lambda x: isinstance(x, _type), geom))
+
+def calc_edge_median(edge):
+    """ Calculate the center position of edge """
+    return ft.reduce(operator.add, [v.co for v in edge.verts])/len(edge.verts)
+
+
+
+def select(elements, val=True):
+    """ For each item in elements set select to val """
+    for el in elements:
+        el.select = val
+
+def link_obj(obj):
+    """ Link object to active scene """
+    bpy.context.scene.objects.link(obj)
+    bpy.context.scene.objects.active = obj
+    select(bpy.data.objects, False)
+    obj.select = True
+    obj.location = bpy.context.scene.cursor_location
+
+def make_mesh(name):
+    """ Make new mesh data """
+    return bpy.data.meshes.new(name)
+
+def bm_to_obj(bm, obj):
+    """ Write bmesh to object data"""
+    bm.to_mesh(obj.data)
+    bm.free()
+
+def make_object(name, data=None):
+    """ Make new object data """
+    return bpy.data.objects.new(name, data)
+
+def bm_from_obj(obj):
+    """ Create bmesh from object data """
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    return bm
+
+def kwargs_from_props(props):
+    """ Converts all properties in a props{bpy.types.PropertyGroup} into dict """
+    valid_types = (
+        int, float, str, tuple, bool, Vector,
+        bpy.types.Material,
+        bpy.types.Object
+        )
+
+    result = {}
+    for p in dir(props):
+        if p.startswith('__') or p in ['rna_type', 'bl_rna']:
+            continue
+        prop = getattr(props, p)
+
+        if isinstance(prop, valid_types):
+            result[p] = prop
+        elif isinstance(prop, bpy.types.PropertyGroup) and not isinstance(prop, type(props)):
+            # property group within this property
+            result.update(kwargs_from_props(prop))
+    return result
+
+      
+def fp_rectangular(bm, width, length, **kwargs):
+    """Create plane in provided bmesh
+    Args:
+        bm     (bmesh.types.BMesh): bmesh to create plane in
+        width  (float): width of plane
+        length (float): length of plane
+    """
+    plane(bm, width, length)
+
+
+
+
+class Floorplan:
+
+    @classmethod
+    def build(cls, context, props):
+        """Use floorplan types and properties to generate geometry
+        Args:
+            context (bpy.context): blender context
+            props (bpy.types.PropertyGroup): FloorplanProperty
+        """
+        obj = make_object('floorplan', make_mesh('fp_mesh'))
+        bm = bm_from_obj(obj)
+
+        kwargs  = kwargs_from_props(props)
+        if props.type == 'RECTANGULAR':
+            fp_rectangular(bm, **kwargs)
+
+        bm_to_obj(bm, obj)
+        link_obj(obj)
+
+class FloorplanProperty(bpy.types.PropertyGroup):
+    fp_types = [
+        ("RECTANGULAR", "Rectangular", "", 0),
+    ]
+
+    type    = EnumProperty(
+        items=fp_types, default='RECTANGULAR',
+        description="Type of floorplan")
+
+    seed    = IntProperty(
+        name="Seed", min=0, max=10000, default=1,
+        description="Seed for random generation")
+
+    width   = FloatProperty(
+        name="Width", min=0.01, max=100.0, default=2,
+        description="Base Width of floorplan")
+
+    length  = FloatProperty(
+        name="Length", min=0.01, max=100.0, default=2,
+        description="Base Length of floorplan")
+
+    radius  = FloatProperty(
+        name="Radius", min=0.1, max=100.0, default=1.0,
+        description="Radius of circle")
+
+    segs    = IntProperty(
+        name="Segments", min=3, max=100, default=32,
+        description="Number of segments in the circle")
+
+    tw1     = FloatProperty(
+        name="Tail Width", min=0.0, max=100.0, default=1,
+        description="Width of floorplan segment")
+
+    tl1     = FloatProperty(
+        name="Tail Length", min=0.0, max=100.0, default=1,
+        description="Length of floorplan segment")
+
+    tw2     = FloatProperty(
+        name="Tail Width 1", min=0.0, max=100.0, default=1,
+        description="Width of floorplan segment")
+
+    tl2     = FloatProperty(
+        name="Tail Length 1", min=0.0, max=100.0, default=1,
+        description="Length of floorplan segment")
+
+    tw3     = FloatProperty(
+        name="Tail Width 2", min=0.0, max=100.0, default=1,
+        description="Width of floorplan segment")
+
+    tl3     = FloatProperty(
+        name="Tail Length 2", min=0.0, max=100.0, default=1,
+        description="Length of floorplan segment")
+
+    tw4     = FloatProperty(
+        name="Tail Width 3", min=0.0, max=100.0, default=1,
+        description="Width of floorplan segment")
+
+    tl4     = FloatProperty(
+        name="Tail Length 3", min=0.0, max=100.0, default=1,
+        description="Length of floorplan segment")
+
+    cap_tris= BoolProperty(
+        name='Cap Triangles', default=False,
+        description='Set the fill type to triangles')
+
+    def draw(self, context, layout):
+        row = layout.row()
+        row.prop(self, "type", text="")
+
+        box = layout.box()
+        if self.type == 'RECTANGULAR':
+            col = box.column(align=True)
+            col.prop(self, 'width')
+            col.prop(self, 'length')
+
+       
+            
+class FloorplanOperator(bpy.types.Operator):
+    """ Create a floorplan object """
+    bl_idname = "btools.add_floorplan"
+    bl_label = "Create Floorplan"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    props = bpy.props.PointerProperty(type=FloorplanProperty)
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT'
+
+    def execute(self, context):
+        Floorplan.build(context, self.props)
+        return {'FINISHED'}
+
+    def draw(self, context):
+        self.props.draw(context, self.layout)
+
+# =======================================================
+#
+#           REGISTER
+#
+# =======================================================
+
+def register():
+    bpy.utils.register_class(MeshGenerationPanel)
+    bpy.utils.register_class(FloorplanProperty)
+    bpy.utils.register_class(FloorplanOperator)
+
+
+def unregister():
+    bpy.utils.unregister_class(MeshGenerationPanel)
+    bpy.utils.unregister_class(FloorplanProperty)
+    bpy.utils.unregister_class(FloorplanOperator)
+
+if __name__ == "__main__":
+    # -- continuos updates with script watcher
+    import os; os.system("clear")
+    try:
+        unregister()
+    except Exception as e:
+        pass
+    finally:
+        register()
